@@ -1,0 +1,14 @@
+pretrained_model_name: "google/vit-base-patch16-224"
+num_labels: 1
+image_size: 224
+patch_size: 60
+hidden_size: 512
+num_hidden_layers: 2
+learning_rate: 2e-5
+train_batch_size: 16
+eval_batch_size: 16
+num_train_epochs: 10
+weight_decay: 0.01
+output_dir: "./outputs"
+logging_dir: "./outputs/logs"
+
