@@ -10,7 +10,10 @@ import pandas as pd
 def load_hea_path(hea_csv_path):
     df = df.load(head_csv_path)
     file_path = df['path']
-    data_dir = 'https://physionet.org/files/mimic-iv-ecg/1.0/' + file_path + '.hea'
+    data_dir = []
+    for pth in file_path:
+        r_dir = 'https://physionet.org/files/mimic-iv-ecg/1.0/' +  file_path + '.hea'
+        r_dir.append(data_dir)
     return data_dir
 
 def is_abnormal(row):
@@ -56,7 +59,8 @@ def preprocess_signal(signal, target_length=5000):
 
 class MIMICIVECGDataset(Dataset):
     def __init__(self,
-                 data_dir='data/mimic-iv-ecg/files',
+                 hea_csv_path = 'data/record_list.csv',
+                 measurement_path = 'data/machine_measurements.csv',
                  max_subjects=100,
                  max_records_per_subject=10,
                  target_length=5000,
@@ -64,7 +68,9 @@ class MIMICIVECGDataset(Dataset):
                  train_ratio=0.8,
                  shuffle=True):
 
-        self.data_dir = Path(data_dir)
+        self.signal_paths = load_hea_path(hea_csv_path)
+        self.measurement_path = measurement_path
+        self.data_dir=[]
         self.signal_paths=[]
         self.database_name = 'mimic-iv-ecg'
         self.target_length = target_length
@@ -72,21 +78,25 @@ class MIMICIVECGDataset(Dataset):
         self.rec_path = []
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+        # hea_data loading
+        self.signal_paths = load_hea_path(hea_csv_path)
 
+        # load label
+        self.labels = make_label(self.measurement_path)
         #for hea in self.data_dir.rglob('*.hea'):
         #    rel = hea.relative_to(self.data_dir).with_suffix('')
         #    self.signal_paths.append(str(rel))
         print("📥 Fetching subject list...")
-        subjects = wfdb.get_record_list(self.database_name)
-        print(f"Found {len(subjects)} subjects")
+        #subjects = wfdb.get_record_list(self.database_name)
+        #print(f"Found {len(subjects)} subjects")
 
         # 실제 레코드 경로 리스트로 확장
-        for subj in subjects[:max_subjects]:
-            pth = f"/files/subj"
-            subj_spec1 = wfdb.rdrecord(pth)
-            print(subj_spec1)
-            for subj_spec2 in wfdb.get_record_list(f"{self.databse_name/subj/subj_spec1}"):
-                print(subj_spec2[:10])
+        #for subj in subjects[:max_subjects]:
+        #    pth = f"/files/subj"
+        #    subj_spec1 = wfdb.rdrecord(pth)
+        #    print(subj_spec1)
+        #    for subj_spec2 in wfdb.get_record_list(f"{self.databse_name/subj/subj_spec1}"):
+        #        print(subj_spec2[:10])
             #print("222222", len(subj), subj)
         #    try:
         #        recs = wfdb.get_record_list(f"{self.database_name}/{subj_clean}")
@@ -132,20 +142,21 @@ class MIMICIVECGDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, idx):
+        
+        # load .hea file
         rec_name = self.signal_paths[idx]
-        full = self.data_dir / rec
-        try:
-            record = wfdb.rdrecord(str(full))
-            signal = record.p_signal
-        except Exception as e:
-            print(f"❌ Failed to read record {rec_name}: {e}")
-            raise e
-
+        record = wfdb.rdrecord(str(rec_name))
         signal = record.p_signal
+    
+        #except Exception as e:
+        #    print(f"❌ Failed to read record {rec_name}: {e}")
+        #    raise e
         signal = preprocess_signal(signal, target_length=self.target_length)
         # shape (time, channel) → (channel, time) for PyTorch
         signal = torch.tensor(signal.T, dtype=torch.float32)
+        
 
-        label = idx % 2  # 임시 dummy label (실제 레이블 없으면 변경 필요)
+        # label 
+        label = self.labels[idx]
         return signal, label
 
