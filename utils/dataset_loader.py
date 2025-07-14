@@ -8,28 +8,31 @@ import random
 import pandas as pd
 
 def load_hea_path(hea_csv_path):
-    df = df.load(head_csv_path)
+    df = pd.read_csv(hea_csv_path)
     file_path = df['path']
     data_dir = []
     for pth in file_path:
-        r_dir = 'https://physionet.org/files/mimic-iv-ecg/1.0/' +  file_path + '.hea'
-        r_dir.append(data_dir)
+        r_dir = 'https://physionet.org/files/mimic-iv-ecg/1.0/' +  pth + '.hea'
+        data_dir.append(r_dir)
+    print(data_dir[:5])
     return data_dir
-
-def is_abnormal(row):
-    keywords = ['abnormal', 'consider', 'infarct', 'ischemia', 'mi']
-    for col in report_cols:
-        val = str(row[col]).lower()
-        if any(keyword in val for keyword in keywords):
-            return 1
-    return 0
 
 
 def make_label(measurement_path):
-    df = df.load(measurement_path)
-    report_cols = [col for col in meas_df.columns if col.startswith('report_')]
-    label = report_cols.apply(is_abnormal, axis=1)
-    return label
+    df = pd.read_csv(measurement_path)
+    report_cols = [col for col in df.columns if col.startswith('report_')]
+    print("✅ 추출된 리포트 컬럼:", report_cols)
+
+    def is_abnormal(row):
+        keywords = ['abnormal', 'consider', 'infarct', 'ischemia', 'mi']
+        for col in report_cols:
+            val = str(row[col]).lower()
+            if any(keyword in val for keyword in keywords):
+                return 1
+        return 0
+
+    labels = df.apply(is_abnormal, axis=1)
+    return labels.tolist()
     
 
 def remove_nan(signal):
@@ -76,11 +79,11 @@ class MIMICIVECGDataset(Dataset):
         self.target_length = target_length
         self.records = []
         self.rec_path = []
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.train_ratio = train_ratio
 
         # hea_data loading
         self.signal_paths = load_hea_path(hea_csv_path)
-
+        print("######", len(self.signal_paths))
         # load label
         self.labels = make_label(self.measurement_path)
         #for hea in self.data_dir.rglob('*.hea'):
@@ -118,25 +121,25 @@ class MIMICIVECGDataset(Dataset):
         if shuffle:
             random.shuffle(self.records)
 
-        total = len(self.records)
-        split_idx = int(total * train_ratio)
+        total = len(self.signal_paths)
+        split_idx = int(total * self.train_ratio)
         if train:
-            self.records = self.records[:split_idx]
+            self.records = self.signal_paths[:split_idx]
             print(f"✅ Using {len(self.records)} training records.")
         else:
-            self.records = self.records[split_idx:]
+            self.records = self.signal_paths[split_idx:]
             print(f"✅ Using {len(self.records)} validation records.")
 
         # 다운로드 (없으면)
-        for rec in self.records:
-            local_path = self.data_dir / rec
-            if not (local_path.with_suffix('.dat').exists() and local_path.with_suffix('.hea').exists()):
-                print(f"📦 Downloading {rec}")
-                wfdb.dl_database(
-                    db_dir=self.database_name,
-                    records=[rec],
-                    dl_dir=str(self.data_dir)
-                )
+        #for rec in self.records:
+        #    local_path = self.data_dir / rec
+        #    if not (local_path.with_suffix('.dat').exists() and local_path.with_suffix('.hea').exists()):
+        #        print(f"📦 Downloading {rec}")
+        #        wfdb.dl_database(
+        #            db_dir=self.database_name,
+        #            records=[rec],
+        #            dl_dir=str(self.data_dir)
+        #        )
 
     def __len__(self):
         return len(self.records)
@@ -144,6 +147,7 @@ class MIMICIVECGDataset(Dataset):
     def __getitem__(self, idx):
         
         # load .hea file
+        print(self.signal_paths[0])
         rec_name = self.signal_paths[idx]
         record = wfdb.rdrecord(str(rec_name))
         signal = record.p_signal
