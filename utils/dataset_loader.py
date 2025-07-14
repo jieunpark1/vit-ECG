@@ -5,7 +5,29 @@ import wfdb
 import torch
 from torch.utils.data import Dataset
 import random
+import pandas as pd
 
+def load_hea_path(hea_csv_path):
+    df = df.load(head_csv_path)
+    file_path = df['path']
+    data_dir = 'https://physionet.org/files/mimic-iv-ecg/1.0/' + file_path + '.hea'
+    return data_dir
+
+def is_abnormal(row):
+    keywords = ['abnormal', 'consider', 'infarct', 'ischemia', 'mi']
+    for col in report_cols:
+        val = str(row[col]).lower()
+        if any(keyword in val for keyword in keywords):
+            return 1
+    return 0
+
+
+def make_label(measurement_path):
+    df = df.load(measurement_path)
+    report_cols = [col for col in meas_df.columns if col.startswith('report_')]
+    label = report_cols.apply(is_abnormal, axis=1)
+    return label
+    
 
 def remove_nan(signal):
     return np.nan_to_num(signal)
