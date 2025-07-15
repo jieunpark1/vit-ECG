@@ -1,27 +1,23 @@
 import os
 from pathlib import Path
-import numpy as np
-import wfdb
+import pandas as pd
+import random
 import torch
 from torch.utils.data import Dataset
-import random
-import pandas as pd
+import numpy as np
+import wfdb
+from tqdm import tqdm  # ✅ 진행률 표시용
+import requests
 
-def load_hea_path(hea_csv_path):
+# ✅ 레코드 리스트 로드
+def load_record_list(hea_csv_path):
     df = pd.read_csv(hea_csv_path)
-    file_path = df['path']
-    data_dir = []
-    for pth in file_path:
-        r_dir = 'https://physionet.org/files/mimic-iv-ecg/1.0/' +  pth + '.hea'
-        data_dir.append(r_dir)
-    print(data_dir[:5])
-    return data_dir
+    return df['path'].tolist()  # 예: ['100/100001234', '101/100001235']
 
-
+# ✅ 라벨 생성 함수
 def make_label(measurement_path):
-    df = pd.read_csv(measurement_path)
+    df = pd.read_csv(measurement_path, low_memory=False)
     report_cols = [col for col in df.columns if col.startswith('report_')]
-    print("✅ 추출된 리포트 컬럼:", report_cols)
 
     def is_abnormal(row):
         keywords = ['abnormal', 'consider', 'infarct', 'ischemia', 'mi']
@@ -33,134 +29,126 @@ def make_label(measurement_path):
 
     labels = df.apply(is_abnormal, axis=1)
     return labels.tolist()
-    
 
-def remove_nan(signal):
-    return np.nan_to_num(signal)
 
-def truncate_or_pad(signal, target_length=5000):
-    current_length = signal.shape[0]
-    if current_length > target_length:
-        return signal[:target_length]
-    elif current_length < target_length:
-        pad_width = target_length - current_length
-        pad = np.zeros((pad_width, signal.shape[1]))
-        return np.concatenate([signal, pad], axis=0)
+# ✅ 유효한 파일인지 검사 (0바이트 파일 제외)
+def is_valid_file(file_path):
+    return file_path.exists() and file_path.stat().st_size > 0
+
+
+# ✅ ecg data 다운로드 함수
+def download_record_files(rec, base_url, save_dir):
+    """
+    rec: ex) 'p1027/p10270654/s47328550/47328550'
+    base_url: 'https://physionet.org/content/mimic-iv-ecg/1.0/'
+    save_dir: local Path
+    """
+    for ext in ['hea', 'dat']:
+        url = f"{base_url}{rec}.{ext}"
+        save_path = save_dir / f"{rec}.{ext}"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        if is_valid_file(save_path):
+            continue
+        try:
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            with open(save_path, 'wb') as f:
+                f.write(r.content)
+        except Exception as e:
+            print(f"❌ Failed to download {url}: {e}")
+            return False
+    return True
+
+
+# ✅ 신호 전처리 함수
+def preprocess_signal(signal, target_length=5000):
+    if signal.shape[0] > target_length:
+        signal = signal[:target_length]
+    elif signal.shape[0] < target_length:
+        pad = target_length - signal.shape[0]
+        signal = np.pad(signal, ((0, pad), (0, 0)), 'constant')
     return signal
 
-def zscore_normalize(signal):
-    mean = signal.mean(axis=0, keepdims=True)
-    std = signal.std(axis=0, keepdims=True)
-    std[std == 0] = 1.0
-    return (signal - mean) / std
-
-def preprocess_signal(signal, target_length=5000):
-    signal = remove_nan(signal)
-    signal = truncate_or_pad(signal, target_length)
-    signal = zscore_normalize(signal)
-    return signal.astype(np.float32)
-
+# ✅ PyTorch Dataset 클래스
 class MIMICIVECGDataset(Dataset):
     def __init__(self,
-                 hea_csv_path = 'data/record_list.csv',
-                 measurement_path = 'data/machine_measurements.csv',
-                 max_subjects=100,
-                 max_records_per_subject=10,
-                 target_length=5000,
+                 hea_csv_path='data/record_list.csv',
+                 measurement_path='data/machine_measurements.csv',
+                 data_dir='/mnt/hdd14/jieun/mimic-iv-ecg/',
+                 database_name='mimic-iv-ecg-1.0',
+                 base_url='https://physionet.org/content/mimic-iv-ecg/1.0/',
                  train=True,
                  train_ratio=0.8,
-                 shuffle=True):
+                 shuffle=True,
+                 max_records=300000,
+                 target_length=5000):
 
-        self.signal_paths = load_hea_path(hea_csv_path)
-        self.measurement_path = measurement_path
-        self.data_dir=[]
-        self.signal_paths=[]
-        self.database_name = 'mimic-iv-ecg'
+        self.data_dir = Path(data_dir)
+        self.database_name = database_name
         self.target_length = target_length
-        self.records = []
-        self.rec_path = []
         self.train_ratio = train_ratio
+        self.base_url = base_url
+        self.signal_paths = load_record_list(hea_csv_path)
+        self.labels = make_label(measurement_path)
+        self.max_records = max_records
+        
+        #한정된 개수의 데이터만 가져오기
+        if self.max_records is not None:
+            self.signal_paths = self.signal_paths[:self.max_records]
+            self.labels = self.labels[:self.max_records]
 
-        # hea_data loading
-        self.signal_paths = load_hea_path(hea_csv_path)
-        print("######", len(self.signal_paths))
-        # load label
-        self.labels = make_label(self.measurement_path)
-        #for hea in self.data_dir.rglob('*.hea'):
-        #    rel = hea.relative_to(self.data_dir).with_suffix('')
-        #    self.signal_paths.append(str(rel))
-        print("📥 Fetching subject list...")
-        #subjects = wfdb.get_record_list(self.database_name)
-        #print(f"Found {len(subjects)} subjects")
-
-        # 실제 레코드 경로 리스트로 확장
-        #for subj in subjects[:max_subjects]:
-        #    pth = f"/files/subj"
-        #    subj_spec1 = wfdb.rdrecord(pth)
-        #    print(subj_spec1)
-        #    for subj_spec2 in wfdb.get_record_list(f"{self.databse_name/subj/subj_spec1}"):
-        #        print(subj_spec2[:10])
-            #print("222222", len(subj), subj)
-        #    try:
-        #        recs = wfdb.get_record_list(f"{self.database_name}/{subj_clean}")
-        #        print("recs", len(recs), recs[:5])
-        #        if not recs:
-        #            print(f"⚠️ No records found for subject {subj_clean}")
-        #            continue
-        #    except Exception as e:
-        #        print(f"⚠️ Failed to get records for subject {subj_clean}: {e}")
-        #        continue
-
-        #for rec in recs[:max_records_per_subject]:
-        #    full_rec = f"{subj_clean}/{rec}"
-        #    self.records.append(full_rec)
-
-        #if len(self.records) == 0:
-        #    raise ValueError("❌ No valid records found in PhysioNet database.")
-
+        
         if shuffle:
-            random.shuffle(self.records)
+            paired = list(zip(self.signal_paths, self.labels))
+            random.shuffle(paired)
+            self.signal_paths, self.labels = zip(*paired)
 
-        total = len(self.signal_paths)
-        split_idx = int(total * self.train_ratio)
+        split_idx = int(len(self.signal_paths) * self.train_ratio)
         if train:
-            self.records = self.signal_paths[:split_idx]
-            print(f"✅ Using {len(self.records)} training records.")
+            self.signal_paths = self.signal_paths[:split_idx]
+            self.labels = self.labels[:split_idx]
+            print(f"✅ Using {len(self.signal_paths)} training samples.")
         else:
-            self.records = self.signal_paths[split_idx:]
-            print(f"✅ Using {len(self.records)} validation records.")
+            self.signal_paths = self.signal_paths[split_idx:]
+            self.labels = self.labels[split_idx:]
+            print(f"✅ Using {len(self.signal_paths)} validation samples.")
 
-        # 다운로드 (없으면)
-        #for rec in self.records:
-        #    local_path = self.data_dir / rec
-        #    if not (local_path.with_suffix('.dat').exists() and local_path.with_suffix('.hea').exists()):
-        #        print(f"📦 Downloading {rec}")
-        #        wfdb.dl_database(
-        #            db_dir=self.database_name,
-        #            records=[rec],
-        #            dl_dir=str(self.data_dir)
-        #        )
+        # ✅ 다운로드 진행률 표시 + 실패 기록
+        failures = []
+        print("🔄 Checking and downloading missing records...")
+        for rec in tqdm(self.signal_paths, desc="📥 Downloading records", unit="rec"):
+            rec_path = self.data_dir / rec
+            hea_file = rec_path.with_suffix('.hea')
+            dat_file = rec_path.with_suffix('.dat')
+
+            if not (hea_file.exists() and dat_file.exists()):
+                success = download_record_files(rec, self.base_url, self.data_dir)
+                if not success:
+                    failures.append(rec)
+                
+
+        # ✅ 실패 로그 출력
+        if failures:
+            print(f"\n⚠️ Failed to download {len(failures)} record(s):")
+            for f in failures:
+                print(" -", f)
 
     def __len__(self):
-        return len(self.records)
+        return len(self.signal_paths)
 
     def __getitem__(self, idx):
-        
-        # load .hea file
-        print(self.signal_paths[0])
-        rec_name = self.signal_paths[idx]
-        record = wfdb.rdrecord(str(rec_name))
-        signal = record.p_signal
-    
-        #except Exception as e:
-        #    print(f"❌ Failed to read record {rec_name}: {e}")
-        #    raise e
-        signal = preprocess_signal(signal, target_length=self.target_length)
-        # shape (time, channel) → (channel, time) for PyTorch
-        signal = torch.tensor(signal.T, dtype=torch.float32)
-        
-
-        # label 
+        rec = self.signal_paths[idx]
         label = self.labels[idx]
+        rec_path = self.data_dir / rec
+
+        try:
+            record = wfdb.rdrecord(str(rec_path))
+            signal = record.p_signal
+        except Exception as e:
+            print(f"❌ Error reading {rec_path}: {e}")
+            raise e
+
+        signal = preprocess_signal(signal, self.target_length)
+        signal = torch.tensor(signal.T, dtype=torch.float32)
         return signal, label
 
